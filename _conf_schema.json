@@ -580,8 +580,20 @@
     "max_context_messages": {
         "description": "最大上下文消息数",
         "type": "int",
-        "hint": "最多获取多少条历史消息作为上下文，0表示不获取，-1表示不限制",
+        "hint": "每次普通聊天交给模型的近期消息上限。会从候选池中保留最近该数量的消息，再额外加入少量相关旧消息。默认200。",
         "default": 200
+    },
+    "context_candidate_messages": {
+        "description": "普通聊天历史候选池",
+        "type": "int",
+        "hint": "每次普通聊天先读取多少条 JSON 近期消息参与筛选。默认700，系统最大700。",
+        "default": 700
+    },
+    "context_relevant_extra": {
+        "description": "额外相关旧消息数",
+        "type": "int",
+        "hint": "从最近消息之前的候选中，按当前话题关键词和发送者最多补入多少条。默认20，系统最大20。",
+        "default": 20
     },
     "custom_storage_max_messages": {
         "description": "📦 自定义存储每会话最大消息数",

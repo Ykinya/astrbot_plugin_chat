@@ -9,9 +9,15 @@
 ```text
 chat_plus 自定义 JSON 最近记录（最多 700 条）
     ↓
-默认选择最近 100～200 条
+读取最多 700 条候选
     ↓
-必要时结合当前消息加入候选中的相关消息
+先保留最近 200 条
+    ↓
+对更早的候选按当前话题和发送者评分
+    ↓
+额外加入最多 20 条相关消息
+    ↓
+按消息 ID 去重并按时间排序
     ↓
 交给模型
 ```
@@ -62,6 +68,8 @@ BM25 + 时间 + 发送者 + 群号加权
 
 ```text
 max_context_messages = 200
+context_candidate_messages = 700
+context_relevant_extra = 20
 custom_storage_max_messages = 700
 history_search_candidates = 200
 history_search_results = 18

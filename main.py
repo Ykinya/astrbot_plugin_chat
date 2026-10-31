@@ -32,7 +32,7 @@
 - @消息会跳过所有判断直接回复
 
 作者: Him666233
-版本: V1.3.0-chat
+版本: V1.3.1-chat
 
 v1.2.1 更新内容：
 - 🆕 Web管理面板 - 全新可视化管理界面，支持JWT认证、访问日志、统计图表、IP安全管理
@@ -283,7 +283,7 @@ from .private_chat import PrivateChatMain  # 🆕 私信功能主处理模块
     "astrbot_plugin_group_chat_plus",
     "Him666233",
     "一个以AI读空气为主的群聊聊天效果增强插件",
-    "V1.3.0-chat",
+    "V1.3.1-chat",
     "https://github.com/Ykinya/astrbot_plugin_chat",
 )
 class ChatPlus(Star):
@@ -2503,6 +2503,12 @@ class ChatPlus(Star):
         ContextManager.init(
             self.plugin_data_dir,
             custom_storage_max_messages=self.custom_storage_max_messages,
+            context_candidate_limit=int(
+                config.get("context_candidate_messages", 700)
+            ),
+            context_relevant_extra=int(
+                config.get("context_relevant_extra", 20)
+            ),
         )
 
         # 🆕 v1.2.0: 初始化图片描述缓存（群聊+私信共享同一份缓存文件）

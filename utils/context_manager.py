@@ -59,6 +59,8 @@ class ContextManager:
 
     # 系统硬上限与近期上下文候选池保持一致，避免模型读取过量历史。
     CUSTOM_STORAGE_HARD_LIMIT: int = 700
+    context_candidate_limit: int = 700
+    context_relevant_extra: int = 20
 
     # 历史截止时间戳：chat_id -> Unix timestamp
     # 插件重置会话时记录，读取平台历史时过滤掉该时间戳之前的消息
@@ -66,7 +68,12 @@ class ContextManager:
     _cutoff_file_path: Optional[Path] = None
 
     @staticmethod
-    def init(data_dir: Optional[str] = None, custom_storage_max_messages: int = 700):
+    def init(
+        data_dir: Optional[str] = None,
+        custom_storage_max_messages: int = 700,
+        context_candidate_limit: int = 700,
+        context_relevant_extra: int = 20,
+    ):
         """
         初始化上下文管理器，创建存储目录
 
@@ -96,6 +103,11 @@ class ContextManager:
 
         # 设置自定义存储限制
         ContextManager.custom_storage_max_messages = custom_storage_max_messages
+        ContextManager.context_candidate_limit = max(
+            200,
+            min(ContextManager.CUSTOM_STORAGE_HARD_LIMIT, int(context_candidate_limit)),
+        )
+        ContextManager.context_relevant_extra = max(0, min(20, int(context_relevant_extra)))
         if custom_storage_max_messages == 0:
             logger.info(
                 "[上下文管理器] 自定义存储已禁用（配置为0），将完全依赖官方存储"
@@ -113,6 +125,89 @@ class ContextManager:
 
         # 加载持久化的历史截止时间戳
         ContextManager._load_cutoff_timestamps(data_dir)
+
+    @staticmethod
+    def _context_terms(text: str) -> list[str]:
+        """Extract cheap Chinese/English terms for recent-history enrichment."""
+        value = re.sub(r"https?://\S+", " ", str(text or "")).casefold()
+        terms: list[str] = []
+        for word in re.findall(r"[a-z0-9_]{2,}", value):
+            if word not in terms:
+                terms.append(word)
+        for chunk in re.findall(r"[\u3400-\u9fff]+", value):
+            if len(chunk) <= 4:
+                candidates = [chunk]
+            else:
+                candidates = [chunk[i : i + size] for size in (2, 3) for i in range(len(chunk) - size + 1)]
+            for term in candidates:
+                if term not in {"这个", "那个", "什么", "怎么", "就是", "然后", "我们", "你们", "他们", "还是", "可以", "现在", "刚才", "之前"} and term not in terms:
+                    terms.append(term)
+        return terms[:16]
+
+    @staticmethod
+    def select_relevant_context(
+        history: List[AstrBotMessage],
+        *,
+        current_message: str,
+        recent_limit: int,
+        extra_limit: int,
+    ) -> List[AstrBotMessage]:
+        """Keep recent messages and enrich with older topic-relevant messages."""
+        if not history:
+            return []
+        history = sorted(
+            history,
+            key=lambda msg: (getattr(msg, "timestamp", 0) or 0),
+        )
+        recent_limit = max(1, min(len(history), int(recent_limit)))
+        extra_limit = max(0, min(20, int(extra_limit)))
+        recent = history[-recent_limit:]
+        older = history[:-recent_limit]
+        if not older or not extra_limit:
+            return recent
+
+        terms = ContextManager._context_terms(current_message)
+        if not terms:
+            return recent
+
+        scored = []
+        for index, msg in enumerate(older):
+            body = str(getattr(msg, "message_str", "") or "")
+            lowered = body.casefold()
+            sender = getattr(msg, "sender", None)
+            sender_name = str(getattr(sender, "nickname", "") or "").casefold()
+            sender_id = str(getattr(sender, "user_id", "") or "")
+            score = 0.0
+            for term in terms:
+                if len(term) >= 2 and term in lowered:
+                    score += 1.0 + min(2.0, len(term) / 3.0)
+                if term in sender_name:
+                    score += 2.5
+                if term == sender_id:
+                    score += 3.0
+            if score > 0:
+                score += (index + 1) / max(1, len(older)) * 0.25
+                scored.append((score, index, msg))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        selected_ids = {id(msg) for msg in recent}
+        result = list(recent)
+        added = 0
+        for _, _, msg in scored:
+            if id(msg) in selected_ids:
+                continue
+            result.append(msg)
+            selected_ids.add(id(msg))
+            added += 1
+            if added >= extra_limit:
+                break
+        result.sort(key=lambda msg: (getattr(msg, "timestamp", 0) or 0))
+        if added:
+            logger.info(
+                f"[上下文管理器] 从较早候选中补充 {added} 条相关消息"
+                f"（候选 {len(history)}，近期 {recent_limit}）"
+            )
+        return result
 
     @staticmethod
     def _load_cutoff_timestamps(data_dir: Optional[str] = None) -> None:
@@ -1008,9 +1103,12 @@ class ContextManager:
 
             history: List[AstrBotMessage] = []
             official_success = False
+            final_context_limit = effective_limit
 
             # ========== 1. 优先读取 chat_plus 自定义近史 ==========
-            history = ContextManager.get_history_messages(event, max_messages)
+            history = ContextManager.get_history_messages(
+                event, ContextManager.context_candidate_limit
+            )
             cutoff_ts = ContextManager.get_history_cutoff(chat_id)
             if cutoff_ts > 0 and history:
                 history = [
@@ -1018,6 +1116,17 @@ class ContextManager:
                     for m in history
                     if (getattr(m, "timestamp", 0) or 0) >= cutoff_ts
                 ]
+            if history:
+                history = ContextManager.select_relevant_context(
+                    history,
+                    current_message=str(getattr(event, "message_str", "") or ""),
+                    recent_limit=effective_limit,
+                    extra_limit=ContextManager.context_relevant_extra,
+                )
+                final_context_limit = min(
+                    ContextManager.context_candidate_limit,
+                    effective_limit + ContextManager.context_relevant_extra,
+                )
             official_success = bool(history)
             if history:
                 logger.info(
@@ -1184,8 +1293,8 @@ class ContextManager:
             )
 
             # 截断到有效限制
-            if len(history) > effective_limit:
-                history = history[-effective_limit:]
+            if len(history) > final_context_limit:
+                history = history[-final_context_limit:]
 
             logger.info(f"[上下文管理器] 最终获取历史消息 {len(history)} 条")
             return history
