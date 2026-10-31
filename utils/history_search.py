@@ -30,6 +30,7 @@ SOFT_CHARS = 10000
 HARD_CHARS = 15000
 CONTEXT_RADIUS = 2
 CACHE_SECONDS = 600
+INDEX_VERSION = 2
 
 _cache: dict[str, tuple[float, str]] = {}
 _index_task: asyncio.Task | None = None
@@ -63,33 +64,57 @@ def extract_text(content: Any) -> str:
     if not isinstance(parts, list):
         return ""
 
-    out: list[str] = []
-    for part in parts:
-        if not isinstance(part, dict):
-            continue
-        kind = str(part.get("type") or part.get("mtype") or "")
-        payload = part.get("data") if isinstance(part.get("data"), dict) else part
+    def walk(value: Any, depth: int = 0) -> list[str]:
+        if depth > 8:
+            return []
+        if isinstance(value, list):
+            found: list[str] = []
+            for item in value:
+                found.extend(walk(item, depth + 1))
+            return found
+        if not isinstance(value, dict):
+            return []
+
+        kind = str(value.get("type") or value.get("mtype") or "").casefold()
+        payload = value.get("data") if isinstance(value.get("data"), dict) else value
         if kind in {"plain", "text"}:
             text = str(payload.get("text") or payload.get("message") or "").strip()
-            if text:
-                out.append(text)
-        elif kind == "at":
+            return [text] if text else []
+        if kind == "at":
             name = str(
                 payload.get("name")
                 or payload.get("qq")
                 or payload.get("user_id")
-                or part.get("qq")
+                or value.get("qq")
                 or ""
             ).strip()
-            if name:
-                out.append(f"@{name}")
-        elif kind == "reply":
-            sender = str(payload.get("sender_name") or payload.get("sender_nickname") or "").strip()
+            return [f"@{name}"] if name else []
+        if kind == "reply":
+            sender = str(
+                payload.get("sender_name") or payload.get("sender_nickname") or ""
+            ).strip()
             text = str(payload.get("text") or payload.get("message_str") or "").strip()
-            if sender or text:
-                out.append(f"[引用 {sender}: {text}]".strip())
-        elif kind == "image":
-            out.append("[图片]")
+            return [f"[引用 {sender}: {text}]".strip()] if sender or text else []
+        if kind == "image":
+            return ["[图片]"]
+
+        if kind in {"node", "nodes", "forward", "forward_message", "json"}:
+            nested = (
+                payload.get("content")
+                or payload.get("message")
+                or payload.get("nodes")
+                or payload.get("messages")
+            )
+            inner = " ".join(walk(nested, depth + 1)).strip()
+            if not inner:
+                return []
+            nickname = str(payload.get("nickname") or payload.get("sender_name") or "").strip()
+            user_id = str(payload.get("user_id") or payload.get("sender_id") or "").strip()
+            who = f"{nickname}({user_id})" if nickname and user_id else nickname or user_id
+            return [f"[转发消息 {who}: {inner}]" if who else f"[转发消息: {inner}]"]
+        return []
+
+    out = walk(parts)
     return " ".join(out).strip()
 
 
@@ -123,6 +148,13 @@ def ensure_index(limit: int = DEFAULT_INDEX_LIMIT) -> int:
             f"CREATE TABLE IF NOT EXISTS {INDEX_STATE}("
             "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
+
+        stored_version = _get_state(conn, "index_version", "0")
+        if stored_version != str(INDEX_VERSION):
+            conn.execute(f"DELETE FROM {INDEX_TABLE}")
+            _set_state(conn, "last_source_id", "0")
+            _set_state(conn, "index_version", str(INDEX_VERSION))
+            conn.commit()
 
         last_id = int(_get_state(conn, "last_source_id", "0") or 0)
         fts_max = conn.execute(f"SELECT max(rowid) FROM {INDEX_TABLE}").fetchone()[0]
