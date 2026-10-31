@@ -31,6 +31,7 @@ HARD_CHARS = 15000
 CONTEXT_RADIUS = 2
 CACHE_SECONDS = 600
 INDEX_VERSION = 2
+INDEX_INTERVAL_SECONDS = 600
 
 _cache: dict[str, tuple[float, str]] = {}
 _index_task: asyncio.Task | None = None
@@ -223,7 +224,7 @@ async def start_indexer() -> None:
                 raise
             except Exception as exc:
                 logger.warning(f"[chat-history-search] 更新索引失败: {exc}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(INDEX_INTERVAL_SECONDS)
 
     _index_task = asyncio.create_task(worker())
 
